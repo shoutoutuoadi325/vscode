@@ -51,6 +51,18 @@ export interface IChatWindowHost {
 	readonly terminalsVisible: IObservable<boolean>;
 	/** The chat's editor moved out of the window, such as into the main window or into an editor window. */
 	didMoveChatOut(): void;
+	/**
+	 * The groups of every part of the window, such as of the parts created for editors dropped on its edges, where the
+	 * chat's editor can move and stay in the window. Without it, those of the chat part and the main part.
+	 */
+	readonly windowGroups?: IChatWindowGroups;
+}
+
+/** The groups of the parts of a window. */
+export interface IChatWindowGroups {
+	readonly groups: readonly IEditorGroup[];
+	readonly onDidAddGroup: Event<IEditorGroup>;
+	readonly onDidRemoveGroup: Event<IEditorGroup>;
 }
 
 /**
@@ -87,14 +99,26 @@ export class ChatWindow extends Disposable implements IChatWindow {
 	) {
 		super();
 
+		const isChatIn = (groups: readonly IEditorGroup[]) => groups.some(group => group.contains(content.input));
 		this._register(trackMainPartEditors(mainPart, {
 			onDidOpenEditor: () => this.showEditor(),
-			onDidCloseLastEditor: () => this.state.showChatOnly(),
+			// Only the chat part can show the chat: with the chat moved to another part, the window keeps its layout
+			onDidCloseLastEditor: () => {
+				if (isChatIn(this.chatPart.groups)) {
+					this.state.showChatOnly();
+				}
+			},
 			isClosing: () => this._closing || this._host.isUnloading(),
 		}));
 
 		// The chat's editor is the chat window: closing it closes the window, and moving it out of the window takes the
-		// chat out of it. It may move between the groups of the chat part, such as when the chat part splits.
+		// chat out of it. It may move between the groups of the parts of the window, such as when the chat part splits or
+		// the chat is dragged into another part.
+		const windowGroups: IChatWindowGroups = _host.windowGroups ?? {
+			get groups() { return [...chatPart.groups, ...mainPart.groups]; },
+			onDidAddGroup: Event.any(chatPart.onDidAddGroup, mainPart.onDidAddGroup),
+			onDidRemoveGroup: Event.any(chatPart.onDidRemoveGroup, mainPart.onDidRemoveGroup),
+		};
 		const chatGroupListeners = this._register(new DisposableMap<IEditorGroup>());
 		const trackChatGroup = (group: IEditorGroup) => chatGroupListeners.set(group, group.onDidCloseEditor(e => {
 			if (e.editor !== content.input || this._closing || this._host.isUnloading()) {
@@ -103,13 +127,13 @@ export class ChatWindow extends Disposable implements IChatWindow {
 			if (e.context !== EditorCloseContext.MOVE) {
 				// Once the editor closed: closing the window closes the part whose group still closes the editor.
 				disposableTimeout(() => this.close(), 0, this._store);
-			} else if (!this.chatPart.groups.some(candidate => candidate.contains(content.input)) && !this.mainPart.groups.some(candidate => candidate.contains(content.input))) {
+			} else if (!isChatIn(windowGroups.groups)) {
 				this._host.didMoveChatOut();
 			}
 		}));
-		chatPart.groups.forEach(trackChatGroup);
-		this._register(chatPart.onDidAddGroup(trackChatGroup));
-		this._register(chatPart.onDidRemoveGroup(group => chatGroupListeners.deleteAndDispose(group)));
+		windowGroups.groups.forEach(trackChatGroup);
+		this._register(windowGroups.onDidAddGroup(trackChatGroup));
+		this._register(windowGroups.onDidRemoveGroup(group => chatGroupListeners.deleteAndDispose(group)));
 
 		this._register(content.onDidEnd(() => this.close()));
 	}
@@ -358,6 +382,7 @@ export class ChatWindowService extends Disposable implements IChatWindowService 
 		const partsBinding = disposables.add(bindEditorPartsToWindow(auxiliaryWindow, [chatPart, mainPart], this._editorGroupsService));
 		const gridRef = observableValue<ChatWindowGrid | undefined>(this, undefined);
 
+		const editorGroupsService = this._editorGroupsService;
 		const window: ChatWindow = disposables.add(new ChatWindow(windowId, content, state, mainPart, chatPart, {
 			focusWindow: () => {
 				if (!auxiliaryWindow.window.document.hasFocus()) {
@@ -370,6 +395,11 @@ export class ChatWindowService extends Disposable implements IChatWindowService 
 			},
 			isUnloading: () => unloading,
 			didMoveChatOut: () => void this._didMoveChatOut(window),
+			windowGroups: {
+				get groups() { return editorGroupsService.groups.filter(group => group.windowId === windowId); },
+				onDidAddGroup: Event.filter(this._editorGroupsService.onDidAddGroup, group => group.windowId === windowId),
+				onDidRemoveGroup: Event.filter(this._editorGroupsService.onDidRemoveGroup, group => group.windowId === windowId),
+			},
 			createTerminalsPart: () => {
 				const part = this._editorGroupsService.createEditorPart({ container: append(host, $('.chat-window-terminals-part')), label: localize('chatWindow.terminalsPart', "Terminals"), services });
 				const store = new DisposableStore();
