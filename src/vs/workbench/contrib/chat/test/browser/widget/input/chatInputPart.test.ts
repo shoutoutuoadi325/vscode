@@ -928,6 +928,7 @@ suite('ChatInputPart', () => {
 			singleLineInputEditorHeight: 32,
 			inputEditorTrailingSpace: 0,
 			ignoreInputEditorContentSizeChanges: false,
+			height: observableValue('height', 0),
 		}) as ChatInputPart;
 
 		inputPart.layout(800);
